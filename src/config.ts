@@ -19,7 +19,9 @@ export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER = true; // Matrix bot always has its own identity
 export const MATRIX_HOMESERVER =
-  process.env.MATRIX_HOMESERVER || envConfig.MATRIX_HOMESERVER || 'https://matrix.org';
+  process.env.MATRIX_HOMESERVER ||
+  envConfig.MATRIX_HOMESERVER ||
+  'https://matrix.org';
 export const MATRIX_USER_ID =
   process.env.MATRIX_USER_ID || envConfig.MATRIX_USER_ID || '';
 export const POLL_INTERVAL = 2000;

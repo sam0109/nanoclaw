@@ -18,7 +18,10 @@ const AUTH_DIR = './store/matrix-auth';
 const CREDENTIALS_FILE = `${AUTH_DIR}/credentials.json`;
 
 function askQuestion(prompt: string, defaultValue?: string): Promise<string> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   const suffix = defaultValue ? ` [${defaultValue}]` : '';
   return new Promise((resolve) => {
     rl.question(`${prompt}${suffix}: `, (answer) => {

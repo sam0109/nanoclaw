@@ -23,16 +23,21 @@ import {
 
 import { MATRIX_HOMESERVER, MATRIX_USER_ID, STORE_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
-import {
-  getLastGroupSync,
-  setLastGroupSync,
-  updateChatName,
-} from '../db.js';
+import { getLastGroupSync, setLastGroupSync, updateChatName } from '../db.js';
 import { logger } from '../logger.js';
-import { Channel, OnInboundMessage, OnChatMetadata, RegisteredGroup } from '../types.js';
+import {
+  Channel,
+  OnInboundMessage,
+  OnChatMetadata,
+  RegisteredGroup,
+} from '../types.js';
 
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const CREDENTIALS_PATH = path.join(STORE_DIR, 'matrix-auth', 'credentials.json');
+const CREDENTIALS_PATH = path.join(
+  STORE_DIR,
+  'matrix-auth',
+  'credentials.json',
+);
 const CRYPTO_STORE_PATH = path.join(STORE_DIR, 'matrix-crypto');
 
 export interface MatrixChannelOpts {
@@ -83,7 +88,9 @@ export class MatrixChannel implements Channel {
     const deviceId = creds.deviceId;
 
     if (!accessToken) {
-      throw new Error('MATRIX_ACCESS_TOKEN not found in .env or credentials file');
+      throw new Error(
+        'MATRIX_ACCESS_TOKEN not found in .env or credentials file',
+      );
     }
 
     // Ensure crypto store directory exists
@@ -153,29 +160,47 @@ export class MatrixChannel implements Channel {
 
   private registerEventHandlers(): void {
     // Handle incoming messages
-    this.client.on(RoomEvent.Timeline, (event: MatrixEvent, room: Room | undefined) => {
-      try {
-        this.handleTimelineEvent(event, room);
-      } catch (err) {
-        logger.error({ err, eventId: event.getId() }, 'Error handling timeline event');
-      }
-    });
+    this.client.on(
+      RoomEvent.Timeline,
+      (event: MatrixEvent, room: Room | undefined) => {
+        try {
+          this.handleTimelineEvent(event, room);
+        } catch (err) {
+          logger.error(
+            { err, eventId: event.getId() },
+            'Error handling timeline event',
+          );
+        }
+      },
+    );
 
     // Track connection state
-    this.client.on(ClientEvent.Sync, (state: SyncState, prevState: SyncState | null) => {
-      if (state === SyncState.Error) {
-        logger.warn('Matrix sync error — will retry');
-        this.connected = false;
-      } else if (state === SyncState.Syncing && prevState === SyncState.Error) {
-        logger.info('Matrix sync recovered');
-        this.connected = true;
-        this.flushOutgoingQueue().catch((err) =>
-          logger.error({ err }, 'Failed to flush outgoing queue on reconnect'),
-        );
-      } else if (state === SyncState.Syncing || state === SyncState.Prepared) {
-        this.connected = true;
-      }
-    });
+    this.client.on(
+      ClientEvent.Sync,
+      (state: SyncState, prevState: SyncState | null) => {
+        if (state === SyncState.Error) {
+          logger.warn('Matrix sync error — will retry');
+          this.connected = false;
+        } else if (
+          state === SyncState.Syncing &&
+          prevState === SyncState.Error
+        ) {
+          logger.info('Matrix sync recovered');
+          this.connected = true;
+          this.flushOutgoingQueue().catch((err) =>
+            logger.error(
+              { err },
+              'Failed to flush outgoing queue on reconnect',
+            ),
+          );
+        } else if (
+          state === SyncState.Syncing ||
+          state === SyncState.Prepared
+        ) {
+          this.connected = true;
+        }
+      },
+    );
 
     // Auto-join rooms on invite
     this.client.on(
@@ -185,16 +210,27 @@ export class MatrixChannel implements Channel {
           member.membership === KnownMembership.Invite &&
           member.userId === this.client.getUserId()
         ) {
-          logger.info({ roomId: member.roomId }, 'Invited to room, auto-joining');
-          this.client.joinRoom(member.roomId).catch((err) =>
-            logger.error({ err, roomId: member.roomId }, 'Failed to auto-join room'),
+          logger.info(
+            { roomId: member.roomId },
+            'Invited to room, auto-joining',
           );
+          this.client
+            .joinRoom(member.roomId)
+            .catch((err) =>
+              logger.error(
+                { err, roomId: member.roomId },
+                'Failed to auto-join room',
+              ),
+            );
         }
       },
     );
   }
 
-  private handleTimelineEvent(event: MatrixEvent, room: Room | undefined): void {
+  private handleTimelineEvent(
+    event: MatrixEvent,
+    room: Room | undefined,
+  ): void {
     // Only process message events
     if (event.getType() !== EventType.RoomMessage) return;
 
@@ -226,7 +262,11 @@ export class MatrixChannel implements Channel {
     const msgtype = content.msgtype as string;
 
     let text = '';
-    if (msgtype === MsgType.Text || msgtype === MsgType.Notice || msgtype === MsgType.Emote) {
+    if (
+      msgtype === MsgType.Text ||
+      msgtype === MsgType.Notice ||
+      msgtype === MsgType.Emote
+    ) {
       text = content.body || '';
     } else if (msgtype === MsgType.Image) {
       text = content.body ? `[Image: ${content.body}]` : '[Image]';
@@ -245,9 +285,12 @@ export class MatrixChannel implements Channel {
     if (!text.trim()) return;
 
     // Extract display name from sender (e.g., "@alice:matrix.org" → "alice")
-    const senderName = room?.getMember(sender)?.name || sender.split(':')[0].slice(1);
+    const senderName =
+      room?.getMember(sender)?.name || sender.split(':')[0].slice(1);
 
-    const eventId = event.getId() || `mx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const eventId =
+      event.getId() ||
+      `mx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     this.opts.onMessage(roomId, {
       id: eventId,
