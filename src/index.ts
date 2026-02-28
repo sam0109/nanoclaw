@@ -8,7 +8,7 @@ import {
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
+import { MatrixChannel } from './channels/matrix.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -51,7 +51,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let matrix: MatrixChannel;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -475,9 +475,9 @@ async function main(): Promise<void> {
   };
 
   // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  matrix = new MatrixChannel(channelOpts);
+  channels.push(matrix);
+  await matrix.connect();
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -505,7 +505,7 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
     registerGroup,
     syncGroupMetadata: (force) =>
-      whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+      matrix?.syncRoomMetadata(force) ?? Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
