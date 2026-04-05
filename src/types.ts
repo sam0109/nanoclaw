@@ -95,6 +95,13 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: reply in a thread created from the trigger message.
+  // Channels that don't support threading simply omit this.
+  sendMessageToThread?(
+    jid: string,
+    text: string,
+    triggerMessageId: string,
+  ): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

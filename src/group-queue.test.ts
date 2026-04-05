@@ -481,4 +481,337 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  // --- Thread concurrency with resolveGroupJid ---
+
+  describe('resolveGroupJid thread support', () => {
+    it('two thread JIDs mapping to same parent share queue state', async () => {
+      let concurrentCount = 0;
+      let maxConcurrent = 0;
+      const completionCallbacks: Array<() => void> = [];
+
+      const processMessages = vi.fn(async (groupJid: string) => {
+        concurrentCount++;
+        maxConcurrent = Math.max(maxConcurrent, concurrentCount);
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        concurrentCount--;
+        return true;
+      });
+
+      // Both thread JIDs resolve to the same parent
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid === 'dc:thread-1' || jid === 'dc:thread-2')
+          return 'dc:parent-channel';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Enqueue two different thread JIDs
+      queue.enqueueMessageCheck('dc:thread-1');
+      queue.enqueueMessageCheck('dc:thread-2');
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Only one should be running (they share the same parent state)
+      expect(maxConcurrent).toBe(1);
+
+      // First call should receive the original thread JID, not the resolved parent
+      expect(processMessages).toHaveBeenNthCalledWith(1, 'dc:thread-1');
+
+      // Complete the first — the second should now run
+      completionCallbacks[0]();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(processMessages).toHaveBeenCalledTimes(2);
+      // Second call should receive the second thread JID
+      expect(processMessages).toHaveBeenNthCalledWith(2, 'dc:thread-2');
+    });
+
+    it('sendMessage uses resolved group state (finds active container via parent)', async () => {
+      const fs = await import('fs');
+      let resolveProcess: () => void;
+
+      const processMessages = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          resolveProcess = resolve;
+        });
+        return true;
+      });
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid === 'dc:thread-1') return 'dc:parent-channel';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Start processing via the parent
+      queue.enqueueMessageCheck('dc:parent-channel');
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Register process with groupFolder
+      queue.registerProcess(
+        'dc:parent-channel',
+        {} as any,
+        'container-1',
+        'parent-folder',
+      );
+
+      // sendMessage via thread JID should find the parent's active container
+      const result = queue.sendMessage('dc:thread-1', 'hello from thread');
+      expect(result).toBe(true);
+
+      // Verify IPC file is written to the parent's groupFolder
+      const writeFileSync = vi.mocked(fs.default.writeFileSync);
+      const ipcWrites = writeFileSync.mock.calls.filter(
+        (call) =>
+          typeof call[0] === 'string' && call[0].includes('parent-folder'),
+      );
+      expect(ipcWrites.length).toBeGreaterThan(0);
+
+      resolveProcess!();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    it('resolveGroupJid defaults to identity (existing behavior preserved)', async () => {
+      const processMessages = vi.fn(async () => true);
+      queue.setProcessMessagesFn(processMessages);
+
+      // No setResolveGroupJidFn call — default identity
+      queue.enqueueMessageCheck('group1@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(processMessages).toHaveBeenCalledWith('group1@g.us');
+    });
+
+    it('thread JIDs queued at concurrency limit are drained with original JIDs', async () => {
+      const completionCallbacks: Array<() => void> = [];
+      const processMessages = vi.fn(async (groupJid: string) => {
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        return true;
+      });
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid.startsWith('dc:thread-')) return 'dc:parent';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Fill both concurrency slots with unrelated groups
+      queue.enqueueMessageCheck('group-a@g.us');
+      queue.enqueueMessageCheck('group-b@g.us');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(processMessages).toHaveBeenCalledTimes(2);
+
+      // Enqueue thread JID while at concurrency limit — should be queued
+      queue.enqueueMessageCheck('dc:thread-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(processMessages).toHaveBeenCalledTimes(2); // still 2
+
+      // Free up a slot — thread should start with original thread JID
+      completionCallbacks[0]();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(processMessages).toHaveBeenCalledTimes(3);
+      expect(processMessages).toHaveBeenNthCalledWith(3, 'dc:thread-1');
+
+      // Cleanup
+      completionCallbacks[1]();
+      completionCallbacks[2]();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    it('multiple thread JIDs from same parent accumulate and drain sequentially', async () => {
+      const completionCallbacks: Array<() => void> = [];
+      const processMessages = vi.fn(async (groupJid: string) => {
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        return true;
+      });
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid.startsWith('dc:thread-')) return 'dc:parent';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Start thread-1 (takes the parent's active slot)
+      queue.enqueueMessageCheck('dc:thread-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(processMessages).toHaveBeenCalledTimes(1);
+      expect(processMessages).toHaveBeenNthCalledWith(1, 'dc:thread-1');
+
+      // While thread-1 is active, enqueue thread-2 and thread-3
+      queue.enqueueMessageCheck('dc:thread-2');
+      queue.enqueueMessageCheck('dc:thread-3');
+
+      // Complete thread-1 — thread-2 should drain next
+      completionCallbacks[0]();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(processMessages).toHaveBeenCalledTimes(2);
+      expect(processMessages).toHaveBeenNthCalledWith(2, 'dc:thread-2');
+
+      // Complete thread-2 — thread-3 should drain
+      completionCallbacks[1]();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(processMessages).toHaveBeenCalledTimes(3);
+      expect(processMessages).toHaveBeenNthCalledWith(3, 'dc:thread-3');
+
+      // Cleanup
+      completionCallbacks[2]();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    it('notifyIdle via thread JID resolves to parent state', async () => {
+      const fs = await import('fs');
+      let resolveProcess: () => void;
+
+      const processMessages = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          resolveProcess = resolve;
+        });
+        return true;
+      });
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid === 'dc:thread-1') return 'dc:parent';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Start via thread-1
+      queue.enqueueMessageCheck('dc:thread-1');
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Register process with parent JID
+      queue.registerProcess(
+        'dc:parent',
+        {} as any,
+        'container-1',
+        'parent-folder',
+      );
+
+      // Enqueue a task for the parent
+      const taskFn = vi.fn(async () => {});
+      queue.enqueueTask('dc:parent', 'task-1', taskFn);
+
+      // notifyIdle via thread JID — should resolve to parent and trigger preemption
+      const writeFileSync = vi.mocked(fs.default.writeFileSync);
+      writeFileSync.mockClear();
+      queue.notifyIdle('dc:thread-1');
+
+      const closeWrites = writeFileSync.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].endsWith('_close'),
+      );
+      expect(closeWrites).toHaveLength(1);
+
+      resolveProcess!();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    it('task enqueued via thread JID shares state with parent', async () => {
+      const executionOrder: string[] = [];
+      let resolveProcess: () => void;
+
+      const processMessages = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          resolveProcess = resolve;
+        });
+        executionOrder.push('messages');
+        return true;
+      });
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid === 'dc:thread-1') return 'dc:parent';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Start processing via parent
+      queue.enqueueMessageCheck('dc:parent');
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Enqueue task via thread JID — should queue on parent's state
+      const taskFn = vi.fn(async () => {
+        executionOrder.push('task');
+      });
+      queue.enqueueTask('dc:thread-1', 'task-1', taskFn);
+
+      // Task should not run yet (parent has active container)
+      expect(taskFn).not.toHaveBeenCalled();
+
+      // Complete the message processing — task should drain
+      resolveProcess!();
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(executionOrder).toEqual(['messages', 'task']);
+    });
+
+    it('sendMessage via thread JID returns false when parent has task container', async () => {
+      let resolveTask: () => void;
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid === 'dc:thread-1') return 'dc:parent';
+        return jid;
+      });
+
+      const taskFn = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          resolveTask = resolve;
+        });
+      });
+
+      // Start a task via parent (sets isTaskContainer = true)
+      queue.enqueueTask('dc:parent', 'task-1', taskFn);
+      await vi.advanceTimersByTimeAsync(10);
+      queue.registerProcess(
+        'dc:parent',
+        {} as any,
+        'container-1',
+        'parent-folder',
+      );
+
+      // sendMessage via thread should return false (task container)
+      const result = queue.sendMessage('dc:thread-1', 'hello');
+      expect(result).toBe(false);
+
+      resolveTask!();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    it('thread and parent enqueues interleave correctly', async () => {
+      const completionCallbacks: Array<() => void> = [];
+      const calledWith: string[] = [];
+      const processMessages = vi.fn(async (groupJid: string) => {
+        calledWith.push(groupJid);
+        await new Promise<void>((resolve) => completionCallbacks.push(resolve));
+        return true;
+      });
+
+      queue.setResolveGroupJidFn((jid) => {
+        if (jid === 'dc:thread-1' || jid === 'dc:thread-2') return 'dc:parent';
+        return jid;
+      });
+      queue.setProcessMessagesFn(processMessages);
+
+      // Start via parent directly
+      queue.enqueueMessageCheck('dc:parent');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(calledWith).toEqual(['dc:parent']);
+
+      // While parent container is active, enqueue from thread-1 and then parent again
+      queue.enqueueMessageCheck('dc:thread-1');
+      queue.enqueueMessageCheck('dc:parent');
+
+      // Complete — drain should pick up thread-1's original JID
+      completionCallbacks[0]();
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Should drain with one of the pending JIDs (thread-1 was enqueued first)
+      expect(calledWith).toHaveLength(2);
+      expect(calledWith[1]).toBe('dc:thread-1');
+
+      // Cleanup
+      completionCallbacks[1]();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+  });
 });

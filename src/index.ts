@@ -12,6 +12,7 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
   POLL_INTERVAL,
+  TRIGGER_PATTERN,
   TIMEZONE,
 } from './config.js';
 import './channels/index.js';
@@ -31,6 +32,7 @@ import {
 } from './container-runtime.js';
 import {
   getAllChats,
+  deleteRegisteredGroup,
   getAllRegisteredGroups,
   getAllSessions,
   deleteSession,
@@ -77,6 +79,15 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+// Thread-to-parent mapping: threadJid → parentJid
+// Discord threads share their parent channel's group (folder, session, memory)
+const threadParents: Record<string, string> = {};
+
+/** Resolve a thread JID to its parent channel JID (identity for non-threads). */
+function resolveParentJid(jid: string): string {
+  return threadParents[jid] || jid;
+}
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -143,6 +154,14 @@ function saveState(): void {
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
+  if (threadParents[jid]) {
+    logger.warn(
+      { jid, parentJid: threadParents[jid] },
+      'Rejecting group registration for known thread JID',
+    );
+    return;
+  }
+
   let groupDir: string;
   try {
     groupDir = resolveGroupFolderPath(group.folder);
@@ -214,17 +233,49 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+/** @internal - exported for testing */
+export function _setChannels(ch: Channel[]): void {
+  channels.length = 0;
+  channels.push(...ch);
+}
+
+/** @internal - exported for testing */
+export function _setThreadParents(tp: Record<string, string>): void {
+  // Clear existing entries and copy new ones
+  for (const key of Object.keys(threadParents)) delete threadParents[key];
+  Object.assign(threadParents, tp);
+}
+
+/** @internal - exported for testing */
+export function _setLastAgentTimestamp(ts: Record<string, string>): void {
+  lastAgentTimestamp = ts;
+}
+
+/** @internal - exported for testing */
+export function _getQueue(): GroupQueue {
+  return queue;
+}
+
+/** @internal - wire processGroupMessages + resolveParentJid to the queue (normally done in main) */
+export function _wireQueue(): void {
+  queue.setProcessMessagesFn(processGroupMessages);
+  queue.setResolveGroupJidFn(resolveParentJid);
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
+ * For thread JIDs, resolves to the parent channel's group but queries
+ * messages by the thread JID (history isolation).
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
+  const parentJid = resolveParentJid(chatJid);
+  const group = registeredGroups[parentJid];
   if (!group) return true;
 
   const channel = findChannel(channels, chatJid);
   if (!channel) {
-    logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+    console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
     return true;
   }
 
@@ -240,7 +291,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (missedMessages.length === 0) return true;
 
   // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  const isThread = !!threadParents[chatJid];
+  if (!isMainGroup && !isThread && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
@@ -264,6 +316,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+
+  // Find trigger message ID for thread creation (Discord).
+  // Use the first message matching TRIGGER_PATTERN, or the first message if no trigger required.
+  // Skip threading when the message is already from a thread (avoid double-threading).
+  const isAlreadyThread = !!threadParents[chatJid];
+  let triggerMessageId: string | undefined;
+  if (!isAlreadyThread && channel.sendMessageToThread) {
+    const triggerMsg = missedMessages.find((m) =>
+      TRIGGER_PATTERN.test(m.content.trim()),
+    );
+    triggerMessageId = triggerMsg?.id ?? missedMessages[0]?.id;
+  }
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -294,7 +358,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        if (triggerMessageId && channel.sendMessageToThread) {
+          await channel.sendMessageToThread(chatJid, text, triggerMessageId);
+        } else {
+          await channel.sendMessage(chatJid, text);
+        }
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -449,7 +517,12 @@ async function startMessageLoop(): Promise<void> {
 
   while (true) {
     try {
-      const jids = Object.keys(registeredGroups);
+      // Include both registered group JIDs and known thread JIDs
+      // so the message loop picks up thread messages too
+      const jids = [
+        ...Object.keys(registeredGroups),
+        ...Object.keys(threadParents),
+      ];
       const { messages, newTimestamp } = getNewMessages(
         jids,
         lastTimestamp,
@@ -474,70 +547,96 @@ async function startMessageLoop(): Promise<void> {
           }
         }
 
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
-          if (!group) continue;
-
-          const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-            continue;
-          }
-
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (needsTrigger) {
-            const triggerPattern = getTriggerPattern(group.trigger);
-            const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) continue;
-          }
-
-          // Pull all messages since lastAgentTimestamp so non-trigger
-          // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
-            chatJid,
-            getOrRecoverCursor(chatJid),
-            ASSISTANT_NAME,
-            MAX_MESSAGES_PER_PROMPT,
-          );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
-
-          if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
-            );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
-            // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
-          } else {
-            // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
-          }
-        }
+        _processInboundBatch(messagesByGroup);
       }
     } catch (err) {
       logger.error({ err }, 'Error in message loop');
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+  }
+}
+
+/** @internal — exported for integration testing */
+export function _processInboundBatch(
+  messagesByGroup: Map<string, NewMessage[]>,
+): void {
+  for (const [chatJid, groupMessages] of messagesByGroup) {
+    const group =
+      registeredGroups[chatJid] || registeredGroups[resolveParentJid(chatJid)];
+    if (!group) continue;
+
+    const channel = findChannel(channels, chatJid);
+    if (!channel) {
+      console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
+      continue;
+    }
+
+    const isMainGroup = group.isMain === true;
+    const isThread = !!threadParents[chatJid];
+    const needsTrigger =
+      !isMainGroup && !isThread && group.requiresTrigger !== false;
+
+    // For non-main groups, only act on trigger messages.
+    // Non-trigger messages accumulate in DB and get pulled as
+    // context when a trigger eventually arrives.
+    if (needsTrigger) {
+      const triggerPattern = getTriggerPattern(group.trigger);
+      const allowlistCfg = loadSenderAllowlist();
+      const hasTrigger = groupMessages.some(
+        (m) =>
+          triggerPattern.test(m.content.trim()) &&
+          (m.is_from_me ||
+            isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+      );
+      if (!hasTrigger) continue;
+    }
+
+    // Pull all messages since lastAgentTimestamp so non-trigger
+    // context that accumulated between triggers is included.
+    const allPending = getMessagesSince(
+      chatJid,
+      getOrRecoverCursor(chatJid),
+      ASSISTANT_NAME,
+      MAX_MESSAGES_PER_PROMPT,
+    );
+    const messagesToSend = allPending.length > 0 ? allPending : groupMessages;
+    const formatted = formatMessages(messagesToSend, TIMEZONE);
+
+    // When a new trigger arrives for a non-thread channel that supports
+    // threading, skip piping into the active container. Fall through to
+    // enqueueMessageCheck so a fresh processGroupMessages runs with its
+    // own triggerMessageId — creating a separate thread.
+    // Also close the active container's stdin so it winds down and the
+    // queued trigger can start promptly.
+    const isNewTriggerForThread =
+      !isThread &&
+      channel.sendMessageToThread &&
+      groupMessages.some((m) => TRIGGER_PATTERN.test(m.content.trim()));
+    if (isNewTriggerForThread) {
+      logger.info(
+        { chatJid },
+        'New trigger for threading channel — closing active container, enqueuing fresh',
+      );
+      queue.closeStdin(chatJid);
+    }
+    if (!isNewTriggerForThread && queue.sendMessage(chatJid, formatted)) {
+      logger.debug(
+        { chatJid, count: messagesToSend.length },
+        'Piped messages to active container',
+      );
+      lastAgentTimestamp[chatJid] =
+        messagesToSend[messagesToSend.length - 1].timestamp;
+      saveState();
+      // Show typing indicator while the container processes the piped message
+      channel
+        .setTyping?.(chatJid, true)
+        ?.catch((err) =>
+          logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+        );
+    } else {
+      // No active container — enqueue for a new one
+      queue.enqueueMessageCheck(chatJid);
+    }
   }
 }
 
@@ -585,6 +684,14 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+
+    // Hard exit deadline — if graceful shutdown hangs, force exit
+    const forceExit = setTimeout(() => {
+      logger.warn('Graceful shutdown timed out, forcing exit');
+      process.exit(0);
+    }, 5000);
+    forceExit.unref();
+
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -749,6 +856,7 @@ async function main(): Promise<void> {
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
+  queue.setResolveGroupJidFn(resolveParentJid);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');

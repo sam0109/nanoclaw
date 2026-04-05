@@ -1,0 +1,29 @@
+[Unit]
+Description=Copilot API Proxy (Docker container on nanoclaw-net)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=sam
+Group=docker
+
+# Ensure the nanoclaw-net network exists before starting
+ExecStartPre=/bin/bash -c '/usr/bin/docker network create nanoclaw-net 2>/dev/null || true'
+# Remove any stopped container so we can re-create it
+ExecStartPre=-/usr/bin/docker rm -f copilot-api
+# Build the image from source
+ExecStartPre=/usr/bin/docker build -t copilot-api /home/sam/git/copilot-api
+
+# Run in foreground (no -d) so systemd tracks the process
+ExecStart=/usr/bin/docker run --name copilot-api --network nanoclaw-net -v /home/sam/git/copilot-api/copilot-data:/root/.local/share/copilot-api copilot-api
+
+ExecStop=/usr/bin/docker stop copilot-api
+ExecStopPost=-/usr/bin/docker rm -f copilot-api
+
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

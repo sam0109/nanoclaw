@@ -63,15 +63,23 @@ describe('stopContainer', () => {
 
 describe('ensureContainerRuntimeRunning', () => {
   it('does nothing when runtime is already running', () => {
+    // docker info succeeds
     mockExecSync.mockReturnValueOnce('');
+    // network create succeeds
+    mockExecSync.mockReturnValueOnce('');
+    // proxy inspect returns 'true' (running)
+    mockExecSync.mockReturnValueOnce('true');
+    // mcp-services inspect returns 'true' (running)
+    mockExecSync.mockReturnValueOnce('true');
 
     ensureContainerRuntimeRunning();
 
-    expect(mockExecSync).toHaveBeenCalledTimes(1);
-    expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} info`, {
-      stdio: 'pipe',
-      timeout: 10000,
-    });
+    expect(mockExecSync).toHaveBeenCalledTimes(4);
+    expect(mockExecSync).toHaveBeenNthCalledWith(
+      1,
+      `${CONTAINER_RUNTIME_BIN} info`,
+      { stdio: 'pipe', timeout: 10000 },
+    );
     expect(logger.debug).toHaveBeenCalledWith(
       'Container runtime already running',
     );

@@ -1,0 +1,17 @@
+[Unit]
+Description=Host Copilot API Proxy (separate from nanoclaw dockerized proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sam
+WorkingDirectory=/home/sam/git/copilot-api
+ExecStart=/home/sam/.bun/bin/bun run ./src/main.ts start
+
+Restart=always
+RestartSec=5
+Environment=PATH=/home/sam/.bun/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+{
+  "name": "nanoclaw-mcp-services",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP services container — CLI-backed tools for NanoClaw agents",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "express": "^4.21.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.0"
+  }
+}

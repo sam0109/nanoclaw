@@ -1,0 +1,31 @@
+[Unit]
+Description=MCP Services (Docker container on nanoclaw-net)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=sam
+Group=docker
+
+# Ensure the nanoclaw-net network exists before starting
+ExecStartPre=/bin/bash -c '/usr/bin/docker network create nanoclaw-net 2>/dev/null || true'
+# Remove any stopped container so we can re-create it
+ExecStartPre=-/usr/bin/docker rm -f mcp-services
+# Build the image from source
+ExecStartPre=/usr/bin/docker build -t mcp-services /home/sam/git/nanoclaw/mcp-services
+
+# Run in foreground (no -d) so systemd tracks the process
+ExecStart=/usr/bin/docker run --name mcp-services \
+    --network nanoclaw-net \
+    mcp-services:latest
+
+ExecStop=/usr/bin/docker stop mcp-services
+ExecStopPost=-/usr/bin/docker rm -f mcp-services
+
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

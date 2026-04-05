@@ -3,12 +3,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   createTask,
+  deleteRegisteredGroup,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getRegisteredGroup,
   getTaskById,
   setRegisteredGroup,
   storeChatMetadata,
@@ -648,5 +650,33 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- deleteRegisteredGroup ---
+
+describe('deleteRegisteredGroup', () => {
+  it('removes a registered group by JID', () => {
+    setRegisteredGroup('dc:1234567890', {
+      name: 'Test Channel',
+      folder: 'test-channel',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    // Verify it exists
+    expect(getRegisteredGroup('dc:1234567890')).toBeDefined();
+
+    // Delete it
+    deleteRegisteredGroup('dc:1234567890');
+
+    // Verify it's gone
+    expect(getRegisteredGroup('dc:1234567890')).toBeUndefined();
+  });
+
+  it('is a no-op for non-existent JIDs', () => {
+    // Should not throw
+    deleteRegisteredGroup('dc:nonexistent');
+    expect(getRegisteredGroup('dc:nonexistent')).toBeUndefined();
   });
 });

@@ -1,1 +1,15 @@
-{}
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vitest:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(sudo systemctl restart nanoclaw:*)",
+      "Bash(tail -f data/nanoclaw.log:*)",
+      "Bash(tail * data/nanoclaw.log:*)"
+    ]
+  }
+}

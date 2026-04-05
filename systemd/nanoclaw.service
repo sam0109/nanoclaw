@@ -1,0 +1,22 @@
+[Unit]
+Description=NanoClaw Matrix Bot
+After=network-online.target copilot-api.service mcp-services.service docker.service
+Wants=network-online.target mcp-services.service
+Requires=copilot-api.service docker.service
+
+[Service]
+Type=simple
+User=sam
+Group=docker
+WorkingDirectory=/home/sam/git/nanoclaw
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/sam/.local/bin
+# Only SIGTERM the main process; orphaned container child processes get
+# SIGKILL after TimeoutStopSec so restarts don't hang waiting on them.
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

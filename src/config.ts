@@ -8,6 +8,8 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
+  'DISCORD_BOT_TOKEN',
+  'DISCORD_ONLY',
   'ONECLI_URL',
   'TZ',
 ]);
@@ -94,3 +96,9 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// Discord configuration
+export const DISCORD_BOT_TOKEN =
+  process.env.DISCORD_BOT_TOKEN || envConfig.DISCORD_BOT_TOKEN || '';
+export const DISCORD_ONLY =
+  (process.env.DISCORD_ONLY || envConfig.DISCORD_ONLY) === 'true';

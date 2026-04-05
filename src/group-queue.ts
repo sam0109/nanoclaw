@@ -20,6 +20,7 @@ interface GroupState {
   isTaskContainer: boolean;
   runningTaskId: string | null;
   pendingMessages: boolean;
+  pendingMessageJids: string[]; // original JIDs that need processing (may differ from resolved key)
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
   containerName: string | null;
@@ -34,9 +35,25 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  private resolveGroupJid: (jid: string) => string = (jid) => jid;
+
+  setResolveGroupJidFn(fn: (jid: string) => string): void {
+    this.resolveGroupJid = fn;
+  }
+
+  /** @internal - reset all state for testing */
+  _reset(): void {
+    this.groups.clear();
+    this.activeCount = 0;
+    this.waitingGroups = [];
+    this.processMessagesFn = null;
+    this.shuttingDown = false;
+    this.resolveGroupJid = (jid) => jid;
+  }
 
   private getGroup(groupJid: string): GroupState {
-    let state = this.groups.get(groupJid);
+    const resolved = this.resolveGroupJid(groupJid);
+    let state = this.groups.get(resolved);
     if (!state) {
       state = {
         active: false,
@@ -44,13 +61,14 @@ export class GroupQueue {
         isTaskContainer: false,
         runningTaskId: null,
         pendingMessages: false,
+        pendingMessageJids: [],
         pendingTasks: [],
         process: null,
         containerName: null,
         groupFolder: null,
         retryCount: 0,
       };
-      this.groups.set(groupJid, state);
+      this.groups.set(resolved, state);
     }
     return state;
   }
@@ -62,34 +80,45 @@ export class GroupQueue {
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
+    const resolved = this.resolveGroupJid(groupJid);
     const state = this.getGroup(groupJid);
 
     if (state.active) {
       state.pendingMessages = true;
-      logger.debug({ groupJid }, 'Container active, message queued');
+      if (!state.pendingMessageJids.includes(groupJid)) {
+        state.pendingMessageJids.push(groupJid);
+      }
+      logger.debug({ groupJid: resolved }, 'Container active, message queued');
       return;
     }
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingMessages = true;
-      if (!this.waitingGroups.includes(groupJid)) {
-        this.waitingGroups.push(groupJid);
+      if (!state.pendingMessageJids.includes(groupJid)) {
+        state.pendingMessageJids.push(groupJid);
+      }
+      if (!this.waitingGroups.includes(resolved)) {
+        this.waitingGroups.push(resolved);
       }
       logger.debug(
-        { groupJid, activeCount: this.activeCount },
+        { groupJid: resolved, activeCount: this.activeCount },
         'At concurrency limit, message queued',
       );
       return;
     }
 
-    this.runForGroup(groupJid, 'messages').catch((err) =>
-      logger.error({ groupJid, err }, 'Unhandled error in runForGroup'),
+    this.runForGroup(resolved, 'messages', groupJid).catch((err) =>
+      logger.error(
+        { groupJid: resolved, err },
+        'Unhandled error in runForGroup',
+      ),
     );
   }
 
   enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
     if (this.shuttingDown) return;
 
+    const resolved = this.resolveGroupJid(groupJid);
     const state = this.getGroup(groupJid);
 
     // Prevent double-queuing: check both pending and currently-running task
@@ -98,34 +127,44 @@ export class GroupQueue {
       return;
     }
     if (state.pendingTasks.some((t) => t.id === taskId)) {
-      logger.debug({ groupJid, taskId }, 'Task already queued, skipping');
+      logger.debug(
+        { groupJid: resolved, taskId },
+        'Task already queued, skipping',
+      );
       return;
     }
 
     if (state.active) {
-      state.pendingTasks.push({ id: taskId, groupJid, fn });
+      state.pendingTasks.push({ id: taskId, groupJid: resolved, fn });
       if (state.idleWaiting) {
-        this.closeStdin(groupJid);
+        this.closeStdin(resolved);
       }
-      logger.debug({ groupJid, taskId }, 'Container active, task queued');
+      logger.debug(
+        { groupJid: resolved, taskId },
+        'Container active, task queued',
+      );
       return;
     }
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
-      state.pendingTasks.push({ id: taskId, groupJid, fn });
-      if (!this.waitingGroups.includes(groupJid)) {
-        this.waitingGroups.push(groupJid);
+      state.pendingTasks.push({ id: taskId, groupJid: resolved, fn });
+      if (!this.waitingGroups.includes(resolved)) {
+        this.waitingGroups.push(resolved);
       }
       logger.debug(
-        { groupJid, taskId, activeCount: this.activeCount },
+        { groupJid: resolved, taskId, activeCount: this.activeCount },
         'At concurrency limit, task queued',
       );
       return;
     }
 
     // Run immediately
-    this.runTask(groupJid, { id: taskId, groupJid, fn }).catch((err) =>
-      logger.error({ groupJid, taskId, err }, 'Unhandled error in runTask'),
+    this.runTask(resolved, { id: taskId, groupJid: resolved, fn }).catch(
+      (err) =>
+        logger.error(
+          { groupJid: resolved, taskId, err },
+          'Unhandled error in runTask',
+        ),
     );
   }
 
@@ -196,22 +235,40 @@ export class GroupQueue {
   private async runForGroup(
     groupJid: string,
     reason: 'messages' | 'drain',
+    originalJid?: string,
   ): Promise<void> {
     const state = this.getGroup(groupJid);
     state.active = true;
     state.idleWaiting = false;
     state.isTaskContainer = false;
-    state.pendingMessages = false;
+    // Collect any pending original JIDs and reset the list
+    const jidsToProcess =
+      state.pendingMessageJids.length > 0 ? [...state.pendingMessageJids] : [];
+    state.pendingMessageJids = [];
     this.activeCount++;
 
+    // Use original JID if provided, otherwise fall back to first queued JID or groupJid
+    const processJid =
+      originalJid || (jidsToProcess.length > 0 ? jidsToProcess[0] : groupJid);
+
+    // If there are remaining pending JIDs beyond the one we're processing,
+    // re-enqueue them so they get processed in subsequent drains
+    const remainingJids = jidsToProcess.filter((jid) => jid !== processJid);
+    if (remainingJids.length > 0) {
+      state.pendingMessages = true;
+      state.pendingMessageJids = remainingJids;
+    } else {
+      state.pendingMessages = false;
+    }
+
     logger.debug(
-      { groupJid, reason, activeCount: this.activeCount },
+      { groupJid, processJid, reason, activeCount: this.activeCount },
       'Starting container for group',
     );
 
     try {
       if (this.processMessagesFn) {
-        const success = await this.processMessagesFn(groupJid);
+        const success = await this.processMessagesFn(processJid);
         if (success) {
           state.retryCount = 0;
         } else {
